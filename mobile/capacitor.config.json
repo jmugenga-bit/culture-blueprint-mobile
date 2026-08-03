@@ -9,10 +9,10 @@
   },
   "android": {
     "appendUserAgent": "CultureBlueprintApp/1.0",
-    "backgroundColor": "#294D66"
+    "backgroundColor": "#14171A"
   },
   "ios": {
     "appendUserAgent": "CultureBlueprintApp/1.0",
-    "backgroundColor": "#294D66"
+    "backgroundColor": "#14171A"
   }
 }

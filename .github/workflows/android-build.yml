@@ -1,0 +1,108 @@
+# Culture Blueprint — Android store build
+# Runs on GitHub's build machines (they carry the full Android toolchain).
+# The native project is GENERATED fresh each run from mobile/capacitor.config.json —
+# config is canonical, the native shell is disposable.
+#
+# Outputs (downloadable from the run's Artifacts):
+#   - app-release.aab  → upload to Google Play (signed if signing secrets are set)
+#   - app-debug.apk    → installable directly on any Android phone for testing
+#
+# Signing secrets (Settings → Secrets and variables → Actions), all optional —
+# without them the build still produces an unsigned AAB + debug APK:
+#   ANDROID_KEYSTORE_BASE64, ANDROID_KEYSTORE_PASSWORD, ANDROID_KEY_ALIAS, ANDROID_KEY_PASSWORD
+
+name: Android build
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths: ["mobile/**", ".github/workflows/android-build.yml"]
+
+jobs:
+  android:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: mobile
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install Capacitor
+        run: npm install
+
+      - name: Generate native Android project
+        run: npx cap add android
+
+      - name: Generate icons and splash screens
+        run: npx capacitor-assets generate --android --assetPath resources
+
+      - name: Set version code and target API 36 (Android 16)
+        run: |
+          echo "==== variables.gradle BEFORE ===="; cat android/variables.gradle || true
+          echo "==== app/build.gradle BEFORE ===="; sed -n '1,15p' android/app/build.gradle || true
+          # Version code: always above any previously used code, and unique per run.
+          VC=$(( 1000 + ${{ github.run_number }} ))
+          sed -i -E "s/versionCode[[:space:]]+[0-9]+/versionCode ${VC}/" android/app/build.gradle
+          # Google Play requires target API 36 (Android 16) from 31 Aug 2026. Force it in the
+          # shared variables file AND hard-set it in the app module, so it can never silently miss.
+          sed -i "s/compileSdkVersion = [0-9][0-9]*/compileSdkVersion = 36/" android/variables.gradle
+          sed -i "s/targetSdkVersion = [0-9][0-9]*/targetSdkVersion = 36/" android/variables.gradle
+          sed -i "s/compileSdk rootProject.ext.compileSdkVersion/compileSdk 36/" android/app/build.gradle
+          sed -i "s/targetSdkVersion rootProject.ext.targetSdkVersion/targetSdkVersion 36/" android/app/build.gradle
+          echo "android.suppressUnsupportedCompileSdk=36" >> android/gradle.properties
+          yes | sdkmanager "platforms;android-36" >/dev/null 2>&1 || true
+          echo "==== variables.gradle AFTER ===="; cat android/variables.gradle
+          echo "==== app/build.gradle AFTER ===="; sed -n '1,15p' android/app/build.gradle
+          # Hard verification — fail the build loudly if API 36 / version code did not apply.
+          grep -q "targetSdkVersion 36" android/app/build.gradle || { echo "FATAL: app targetSdkVersion not 36"; exit 1; }
+          grep -q "compileSdk 36" android/app/build.gradle || { echo "FATAL: app compileSdk not 36"; exit 1; }
+          grep -q "versionCode ${VC}" android/app/build.gradle || { echo "FATAL: versionCode not applied"; exit 1; }
+          echo "OK: targetSdk 36, compileSdk 36, versionCode ${VC}"
+
+      - name: Build release bundle and debug APK
+        run: |
+          cd android
+          chmod +x gradlew
+          ./gradlew bundleRelease assembleDebug --no-daemon
+
+      - name: Sign release bundle (when signing secrets are configured)
+        env:
+          KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          if [ -z "$KEYSTORE_BASE64" ]; then
+            echo "No signing secrets configured — producing unsigned AAB (fine for testing)."
+            exit 0
+          fi
+          echo "$KEYSTORE_BASE64" | base64 -d > upload.jks
+          jarsigner -keystore upload.jks \
+            -storepass "$KEYSTORE_PASSWORD" -keypass "$KEY_PASSWORD" \
+            -sigalg SHA256withRSA -digestalg SHA-256 \
+            android/app/build/outputs/bundle/release/app-release.aab "$KEY_ALIAS"
+          rm -f upload.jks
+          echo "Bundle signed."
+
+      - name: Collect outputs
+        run: |
+          mkdir -p out
+          cp android/app/build/outputs/bundle/release/app-release.aab out/ || true
+          cp android/app/build/outputs/apk/debug/app-debug.apk out/ || true
+          ls -la out/
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: culture-blueprint-android
+          path: mobile/out/
+          if-no-files-found: error

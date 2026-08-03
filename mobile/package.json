@@ -1,0 +1,14 @@
+{
+  "name": "culture-blueprint-mobile",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Culture Blueprint — native app shell (Capacitor). The web app at app.cultureblueprint.co.uk is the product; this shell wraps it for Google Play and the App Store.",
+  "dependencies": {
+    "@capacitor/android": "^7.0.0",
+    "@capacitor/core": "^7.0.0"
+  },
+  "devDependencies": {
+    "@capacitor/cli": "^7.0.0",
+    "@capacitor/assets": "^3.0.5"
+  }
+}

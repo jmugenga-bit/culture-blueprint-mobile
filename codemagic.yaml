@@ -1,0 +1,81 @@
+# Culture Blueprint — iOS build → TestFlight (Codemagic)
+# Thin Capacitor shell that loads the live web app at app.cultureblueprint.co.uk.
+# The native iOS project is generated fresh each run from mobile/capacitor.config.json.
+#
+# Reuses the account-wide Apple signing set up for Career Agenting:
+#   - App Store Connect API key integration (same key works across all apps).
+#   - CERTIFICATE_PRIVATE_KEY (the one distribution certificate signs every app).
+# One-time setup: create the App ID (uk.co.cultureblueprint.app) + an App Store
+# Connect app for Culture Blueprint, then run this workflow.
+
+workflows:
+  ios-testflight:
+    name: Culture Blueprint — iOS (TestFlight)
+    instance_type: mac_mini_m2
+    max_build_duration: 60
+    integrations:
+      app_store_connect: CareerAgentingASC   # account-wide ASC API key (reused)
+    environment:
+      groups:
+        - appstore_credentials   # holds CERTIFICATE_PRIVATE_KEY (base64 of the signing key)
+      vars:
+        XCODE_SCHEME: "App"
+        BUNDLE_ID: "uk.co.cultureblueprint.app"
+      node: 20
+      xcode: latest
+      cocoapods: default
+    scripts:
+      - name: Install Capacitor dependencies
+        script: |
+          cd mobile
+          npm install
+          # Add the iOS platform package (the repo ships Android-only deps).
+          npm install @capacitor/ios@^7.0.0
+      - name: Generate the iOS project + icons/splash
+        script: |
+          cd mobile
+          npx cap add ios || true
+          npx capacitor-assets generate --ios --assetPath resources || true
+          npx cap sync ios
+      - name: iOS 15 minimum + encryption exemption
+        script: |
+          # Raise the minimum iOS version to 15.0 (fixes Apple ITMS-90068), and
+          # declare the app uses only Apple's built-in (exempt) encryption so the
+          # App Store Connect compliance dialog never blocks a build.
+          cd mobile/ios/App
+          sed -i '' "s/platform :ios, '[0-9.]*'/platform :ios, '15.0'/" Podfile || true
+          sed -i '' 's/IPHONEOS_DEPLOYMENT_TARGET = [0-9.]*;/IPHONEOS_DEPLOYMENT_TARGET = 15.0;/g' App.xcodeproj/project.pbxproj || true
+          /usr/libexec/PlistBuddy -c "Set :ITSAppUsesNonExemptEncryption false" App/Info.plist 2>/dev/null \
+            || /usr/libexec/PlistBuddy -c "Add :ITSAppUsesNonExemptEncryption bool false" App/Info.plist
+      - name: Set up code signing (create cert + profile if missing)
+        script: |
+          # Reuses the persistent distribution key; creates the provisioning
+          # profile for this bundle id the first time it runs.
+          keychain initialize
+          echo "$CERTIFICATE_PRIVATE_KEY" | openssl base64 -A -d > /tmp/cert_key.pem
+          app-store-connect fetch-signing-files "$BUNDLE_ID" \
+            --platform IOS \
+            --type IOS_APP_STORE \
+            --certificate-key=@file:/tmp/cert_key.pem \
+            --create
+          keychain add-certificates
+          cd mobile/ios/App
+          xcode-project use-profiles
+      - name: Install CocoaPods
+        script: |
+          cd mobile/ios/App
+          pod install
+      - name: Build the signed IPA
+        script: |
+          cd mobile/ios/App
+          xcode-project build-ipa \
+            --workspace "App.xcworkspace" \
+            --scheme "$XCODE_SCHEME"
+    artifacts:
+      - mobile/ios/App/build/ios/ipa/*.ipa
+      - /tmp/xcodebuild_logs/*.log
+    publishing:
+      app_store_connect:
+        auth: integration
+        submit_to_testflight: true
+        # Beta only for now — no auto-submit to App Store review.
